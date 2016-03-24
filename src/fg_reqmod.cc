@@ -1,3 +1,7 @@
+/*
+	Copyright Jacob Carter 2015 - 2016
+	Based on the eCAP Adapter Sample found here: http://e-cap.org/Downloads
+*/
 #include <exception>
 #include <string.h>
 #include <string>

@@ -1,7 +1,8 @@
 /*
-	Copyright 2015, 2016 Jacob Carter
+	Copyright Jacob Carter 2015 - 2016
 	Based on the eCAP Adapter Sample found here: http://e-cap.org/Downloads
 */
+#include <stdexcept>
 #include <exception>
 #include <string.h>
 #include <string>
@@ -107,8 +108,10 @@ class Xaction: public libecap::adapter::Xaction {
 
 		// custom method dealing with sending VB content to ecapguardian
 		void sendVbContent(std::string &chunk) const;
+		void checkWritten(ssize_t s, size_type sent);
 
 	private:
+		std::string previousChunk;
 		std::ofstream logFile;
 
 		libecap::shared_ptr<const Service> service; // configuration access
@@ -224,7 +227,7 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
         //service->ecapguardian_listen_socket is the socket path string
 	socketHandle = socket(AF_UNIX, SOCK_STREAM, 0);
         if (socketHandle == -1) {
-		logFile << "RESPMOD Socket() errno: " << strerror(errno) << std::endl;
+		logFile << "RESPMOD Socket() filename " << service->ecapguardian_listen_socket << " errno: " << strerror(errno) << std::endl;
 		throw libecap::TextException(RunErrorPrefix + "Failed to get Socket Handle for socket filename '" +
 			service->ecapguardian_listen_socket + "'. errno: " + strerror(errno));
         }
@@ -234,10 +237,10 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, service->ecapguardian_listen_socket.c_str(), sizeof(addr.sun_path)-1);
 
-        //logFile << "eCAP adapter: Connecting to socket" << std::endl;
+logFile << "RESPMOD Xaction::Xaction: Connecting to socket" << std::endl;
         //Make the connection
         socketConnectStatus = connect(socketHandle, (struct sockaddr*)&addr, sizeof(addr));
-        //logFile << "eCAP adapter: after Connect, s=" << s << std::endl;
+logFile << "RESPMOD Xaction::Xaction: after Connect, s=" << s << std::endl;
 
         if (socketConnectStatus < 0) {
         	logFile << "RESPMOD Connect errno: " << strerror(errno) << std::endl;
@@ -282,8 +285,10 @@ void Adapter::Xaction::start() {
 	logFile << "RESPMOD Xaction::start : Header String:" << std::endl
                 << hostx->virgin().header().image().toString() << std::endl;
 #endif
+	libecap::shared_ptr<libecap::Message> cause = hostx->cause().clone();
 	libecap::shared_ptr<libecap::Message> adapted = hostx->virgin().clone();
 	Must(adapted != 0);
+	Must(cause != 0);
 	if (!adapted->body()) {
 #ifdef DEBUG
 		logFile << "RESPMOD Xaction::start : no response body - skipping scan" << std::endl;
@@ -295,27 +300,17 @@ void Adapter::Xaction::start() {
 
 #ifdef SOCKET
 	//
+	// Write the request headers to ecapguardian
+	// These are necessary for the response scanners in ecapguardian
+	ssize_t s = 0;
+	s = write(socketHandle, cause->header().image().start, cause->header().image().size);
+	checkWritten(s, cause->header().image().size, std::string("cause"));
+	//
 	// Write the response headers to ecapguardian
 	//
 	//ssize_t write(int fd, const void *buf, size_t count);
-	ssize_t s = 0;
         s = write(socketHandle, adapted->header().image().start, adapted->header().image().size);
-	if(s == -1){
-#ifdef DEBUG
-                logFile << "RESPMOD Xaction::start : errno on header write. errno:" << strerror(errno) << std::endl;
-#endif
-                //There was some sort of error
-                //We can recover from one of these types of errors
-                if(errno){
-                        //Not recoverable
-                        throw libecap::TextException(RunErrorPrefix + "Failed to write RESPMOD header to ecapguardian. errno: " 
-				+ strerror(errno));
-                }
-        }
-        if(s != adapted->header().image().size){
-                throw libecap::TextException(RunErrorPrefix + "Failed RESPMOD headers write to ecapguardian. Wrote "
-			+  std::to_string(s) + " instead of " + std::to_string(adapted->header().image().size));
-        }
+	checkWritten(s, adapted->header().image().size, std::string("response"));
 #endif
 
 	if (hostx->virgin().body()) {
@@ -332,6 +327,30 @@ void Adapter::Xaction::start() {
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::start : end of method" << std::endl;
 #endif
+}
+
+void Adapter::Xaction::checkWritten(ssize_t sent, size_type expectedSent, std::string name) {
+	if(sent == -1){
+		std::string error("RESPMOD Xaction::checkWritten : errno on '" + name + "' header write. errno: ");
+		error.append(strerror(errno));
+#ifdef DEBUG
+                logFile << error << std::endl;
+#endif
+                //There was some sort of error
+                //We can recover from one of these types of errors
+                if(errno){
+                        //Not recoverable
+                        throw libecap::TextException(error);
+                }
+        }
+        if(sent != expectedSent){
+		std::string error(RunErrorPrefix + "Failed RESPMOD '" + name + "' headers write to ecapguardian. Wrote "
+                        +  std::to_string(sent) + " instead of " + std::to_string(expectedSent));
+#ifdef DEBUG
+		logFile << error << std::endl;
+#endif
+                throw libecap::TextException(error);
+        }
 }
 
 void Adapter::Xaction::stop() {
@@ -424,9 +443,9 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 
 	// For the moment, just tell the host to use the original body.
 	// Need to make sure I handle this case - easy to lose it
-	if(atEnd) {
-		lastHostCall()->useVirgin();
-	}
+//	if(atEnd) {
+	lastHostCall()->useVirgin();
+//	}
 
 	if (sendingAb == opOn) {
 		hostx->noteAbContentDone(atEnd);
@@ -440,8 +459,22 @@ void Adapter::Xaction::noteVbContentAvailable() {
 	logFile << "RESPMOD Xaction::noteVbContentAvailable" << std::endl;
 #endif
 	const libecap::Area vb = hostx->vbContent(0, libecap::nsize); // get all vb in this chunk
-	//std::string chunk = vb.toString(); // expensive, but simple
+	std::string chunk = vb.toString(); // expensive, but simple
 
+	//libecap::nsize above means 'until the end of the string'
+
+	logFile << "RESPMOD Xaction::noteVbContentAvailable : Chunk size: " << chunk.size() << std::endl;
+
+	if(!previousChunk.empty()){
+		// Compare the two - my guess is that the previousChunk will match the current chunk up until the length difference
+		logFile << "RESPMOD Xaction::noteVbContentAvailable : Previous Chunk size: " << previousChunk.size() << std::endl;
+		for(int i = 0; i < previousChunk.size(); i++){
+			if(previousChunk[i] != chunk[i]){
+				logFile << "Previous Chunk mismatch at " << i << std::endl;
+			}
+		}
+	}
+	previousChunk = chunk;
 	// We need the host to keep the original VB - don't tell it to throw anything away
 	// Is the only other option for the adapter to maintain the chunks and send them back
 	//	if the virgin body is OK?
