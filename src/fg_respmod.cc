@@ -108,7 +108,7 @@ class Xaction: public libecap::adapter::Xaction {
 
 		// custom method dealing with sending VB content to ecapguardian
 		void sendVbContent(std::string &chunk) const;
-		void checkWritten(ssize_t s, size_type sent);
+		void checkWritten(ssize_t sent, size_type expectedSent, std::string name);
 
 	private:
 		std::string previousChunk;
@@ -220,7 +220,6 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
 	logFile << "RESPMOD Xaction::Xaction" << std::endl;
 	logFile.flush();
 #endif
-#ifdef SOCKET
         //Initializing the Unix Domain Socket connection
         int socketConnectStatus;
         struct sockaddr_un addr;
@@ -237,10 +236,10 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, service->ecapguardian_listen_socket.c_str(), sizeof(addr.sun_path)-1);
 
-logFile << "RESPMOD Xaction::Xaction: Connecting to socket" << std::endl;
+	logFile << "RESPMOD Xaction::Xaction: Connecting to socket: " << service->ecapguardian_listen_socket.c_str() << std::endl;
         //Make the connection
         socketConnectStatus = connect(socketHandle, (struct sockaddr*)&addr, sizeof(addr));
-logFile << "RESPMOD Xaction::Xaction: after Connect, s=" << s << std::endl;
+	logFile << "RESPMOD Xaction::Xaction: after Connect, s=" << socketConnectStatus << std::endl;
 
         if (socketConnectStatus < 0) {
         	logFile << "RESPMOD Connect errno: " << strerror(errno) << std::endl;
@@ -248,7 +247,6 @@ logFile << "RESPMOD Xaction::Xaction: after Connect, s=" << s << std::endl;
 			+ strerror(errno));
         }
         //If you got here, you're ready to start writing to the socket
-#endif
 }
 
 Adapter::Xaction::~Xaction() {
@@ -259,10 +257,8 @@ Adapter::Xaction::~Xaction() {
 		hostx = 0;
 		x->adaptationAborted();
 	}
-#ifdef SOCKET
 	//Close the socket
         close(socketHandle);
-#endif
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::~Xaction" << std::endl;
 	logFile << "==================================================" << std::endl;
@@ -298,7 +294,6 @@ void Adapter::Xaction::start() {
 		return;
 	}
 
-#ifdef SOCKET
 	//
 	// Write the request headers to ecapguardian
 	// These are necessary for the response scanners in ecapguardian
@@ -311,7 +306,6 @@ void Adapter::Xaction::start() {
 	//ssize_t write(int fd, const void *buf, size_t count);
         s = write(socketHandle, adapted->header().image().start, adapted->header().image().size);
 	checkWritten(s, adapted->header().image().size, std::string("response"));
-#endif
 
 	if (hostx->virgin().body()) {
 #ifdef DEBUG
