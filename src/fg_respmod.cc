@@ -123,6 +123,16 @@ class Xaction: public libecap::adapter::Xaction {
 		typedef enum { opUndecided, opOn, opComplete, opNever } OperationState;
 		OperationState receivingVb;
 		OperationState sendingAb;
+
+		////  Flags and such for communication with server
+                const int BUF_SIZE = 1024;
+                const char FLAG_USE_VIRGIN = 'v';
+                const char FLAG_MODIFY = 'm';
+                const char FLAG_NEEDS_SCAN = 's';
+		const char FLAG_BLOCK = 'b';
+                const char FLAG_MSG_RECVD = 'r'; // used to signal header/body received to the server
+                const std::string FLAG_END = "\n\n\0\0"; //used for headers/body end
+                const std::string FLAG_END_REMOVE = "\0\0"; //Remove this from the end of the headers/body
 };
 
 static const std::string PACKAGE_NAME = "FilterGizmo RESPMOD ecapguardian";
@@ -215,7 +225,7 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
 	std::string filename;
 	int randomId;
 	srand(time(NULL));
-	filename += "/tmp/respmodXaction" + std::to_string(randomId) + ".log";
+	filename += "/tmp/respmodXaction" + std::to_string((rand() % 256)) + ".log";
 	logFile.open(filename.c_str(), std::ofstream::out | std::ofstream::app);
 	logFile << "RESPMOD Xaction::Xaction" << std::endl;
 	logFile.flush();
@@ -247,6 +257,7 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
 			+ strerror(errno));
         }
         //If you got here, you're ready to start writing to the socket
+	logFile << std::flush;
 }
 
 Adapter::Xaction::~Xaction() {
@@ -262,6 +273,7 @@ Adapter::Xaction::~Xaction() {
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::~Xaction" << std::endl;
 	logFile << "==================================================" << std::endl;
+	logFile << std::flush;
 	logFile.close();
 #endif
 }
@@ -275,14 +287,20 @@ void Adapter::Xaction::visitEachOption(libecap::NamedValueVisitor &) const {
 }
 
 void Adapter::Xaction::start() {
+	char buf[BUF_SIZE];
+	char c;
 	Must(hostx);
+	libecap::shared_ptr<libecap::Message> adapted = hostx->virgin().clone();
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::start" << std::endl;
 	logFile << "RESPMOD Xaction::start : Header String:" << std::endl
-                << hostx->virgin().header().image().toString() << std::endl;
+                << adapted->header().image().toString() << std::endl;
 #endif
 	libecap::shared_ptr<libecap::Message> cause = hostx->cause().clone();
-	libecap::shared_ptr<libecap::Message> adapted = hostx->virgin().clone();
+#ifdef DEBUG
+	logFile << "RESPMOD Xaction::start : CAUSE Header String: " << std::endl
+		<< cause->header().image().toString() << std::endl;
+#endif
 	Must(adapted != 0);
 	Must(cause != 0);
 	if (!adapted->body()) {
@@ -299,13 +317,36 @@ void Adapter::Xaction::start() {
 	// These are necessary for the response scanners in ecapguardian
 	ssize_t s = 0;
 	s = write(socketHandle, cause->header().image().start, cause->header().image().size);
-	checkWritten(s, cause->header().image().size, std::string("cause"));
+	checkWritten(s, cause->header().image().size, std::string("cause header"));
+
+	//Make a BLOCKING read call, so that this adapter does not proceed
+        //until the request is fulfilled
+        s = read(socketHandle, buf, 1);
+
+#ifdef DEBUG
+        logFile << "RESPMOD Xaction::start : After receiving response char, s=" << s << std::endl;
+#endif
+        if(s != 1){
+                throw libecap::TextException("After response char, s was " + std::to_string(s));
+                exit(-1);
+        }
+
+	c = buf[0];
+
+	if(c == FLAG_USE_VIRGIN) {
+#ifdef DEBUG
+                logFile << "RESPMOD Xaction::start : skipping content scan after request header check" << std::endl;
+#endif
+                lastHostCall()->useVirgin();
+		return;
+	}
+
 	//
 	// Write the response headers to ecapguardian
 	//
 	//ssize_t write(int fd, const void *buf, size_t count);
         s = write(socketHandle, adapted->header().image().start, adapted->header().image().size);
-	checkWritten(s, adapted->header().image().size, std::string("response"));
+	checkWritten(s, adapted->header().image().size, std::string("response header"));
 
 	if (hostx->virgin().body()) {
 #ifdef DEBUG
@@ -320,12 +361,13 @@ void Adapter::Xaction::start() {
 	// End of the 'start' method is reached long before the last of the VB is delivered
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::start : end of method" << std::endl;
+	logFile << std::flush;
 #endif
 }
 
 void Adapter::Xaction::checkWritten(ssize_t sent, size_type expectedSent, std::string name) {
 	if(sent == -1){
-		std::string error("RESPMOD Xaction::checkWritten : errno on '" + name + "' header write. errno: ");
+		std::string error("RESPMOD Xaction::checkWritten : errno on '" + name + "' write. errno: ");
 		error.append(strerror(errno));
 #ifdef DEBUG
                 logFile << error << std::endl;
@@ -431,6 +473,7 @@ void Adapter::Xaction::abContentShift(size_type size) {
 void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::noteVbContentDone : atEnd=" << atEnd << std::endl;
+	logFile << std::flush;
 #endif
 	Must(receivingVb == opOn);
 	stopVb();
@@ -451,6 +494,7 @@ void Adapter::Xaction::noteVbContentAvailable() {
 	Must(receivingVb == opOn);
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::noteVbContentAvailable" << std::endl;
+	logFile << std::flush;
 #endif
 	const libecap::Area vb = hostx->vbContent(0, libecap::nsize); // get all vb in this chunk
 	std::string chunk = vb.toString(); // expensive, but simple
