@@ -16,6 +16,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <thread>
+#include <chrono>
 
 #include <libecap/common/registry.h>
 #include <libecap/common/errors.h>
@@ -291,15 +293,9 @@ void Adapter::Xaction::start() {
 	char c;
 	Must(hostx);
 	libecap::shared_ptr<libecap::Message> adapted = hostx->virgin().clone();
-#ifdef DEBUG
-	logFile << "RESPMOD Xaction::start" << std::endl;
-	logFile << "RESPMOD Xaction::start : Header String:" << std::endl
-                << adapted->header().image().toString() << std::endl;
-#endif
 	libecap::shared_ptr<libecap::Message> cause = hostx->cause().clone();
 #ifdef DEBUG
-	logFile << "RESPMOD Xaction::start : CAUSE Header String: " << std::endl
-		<< cause->header().image().toString() << std::endl;
+	logFile << "RESPMOD Xaction::start" << std::endl;
 #endif
 	Must(adapted != 0);
 	Must(cause != 0);
@@ -314,15 +310,33 @@ void Adapter::Xaction::start() {
 
 	//
 	// Write the request headers to ecapguardian
-	// These are necessary for the response scanners in ecapguardian
+	// These are necessary for the response scanner plugins in ecapguardian
 	ssize_t s = 0;
+	// NOTE: ecapguardian REQUIRES 1 character past the final newline, so we just write 'size'
+	// instead of 'size - 1' because the last one is a null.  Same below with the response header.
 	s = write(socketHandle, cause->header().image().start, cause->header().image().size);
 	checkWritten(s, cause->header().image().size, std::string("cause header"));
 
-	//Make a BLOCKING read call, so that this adapter does not proceed
-        //until the request is fulfilled
-        s = read(socketHandle, buf, 1);
+	//
+	// Write the response headers to ecapguardian
+	//
+	//ssize_t write(int fd, const void *buf, size_t count);
+        s = write(socketHandle, adapted->header().image().start, adapted->header().image().size);
+	checkWritten(s, adapted->header().image().size, std::string("response header"));
 
+	// For some reason, the socket is not blocking.  This will do until I figure out why.
+	for(int sleepCount = 0; sleepCount < 10; sleepCount++) {
+#ifdef DEBUG
+		logFile << "RESPMOD Xaction::start : Sleeping #" << sleepCount << std::endl;
+#endif
+	        s = read(socketHandle, buf, 1);
+		if(s > 0) {
+			logFile << "RESPMOD Xaction::start : s > 0: " << s << std::endl;
+			break;
+		} else {
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+	}
 #ifdef DEBUG
         logFile << "RESPMOD Xaction::start : After receiving response char, s=" << s << std::endl;
 #endif
@@ -332,21 +346,18 @@ void Adapter::Xaction::start() {
         }
 
 	c = buf[0];
-
 	if(c == FLAG_USE_VIRGIN) {
 #ifdef DEBUG
                 logFile << "RESPMOD Xaction::start : skipping content scan after request header check" << std::endl;
 #endif
+		sendingAb = opNever; // there is nothing to send
                 lastHostCall()->useVirgin();
 		return;
 	}
 
-	//
-	// Write the response headers to ecapguardian
-	//
-	//ssize_t write(int fd, const void *buf, size_t count);
-        s = write(socketHandle, adapted->header().image().start, adapted->header().image().size);
-	checkWritten(s, adapted->header().image().size, std::string("response header"));
+	//Write back the message received flag
+	//buf[0] = FLAG_MSG_RECVD;
+	s = write(socketHandle, &FLAG_MSG_RECVD, 1);
 
 	if (hostx->virgin().body()) {
 #ifdef DEBUG
@@ -481,6 +492,8 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 	// For the moment, just tell the host to use the original body.
 	// Need to make sure I handle this case - easy to lose it
 //	if(atEnd) {
+	//Write back the message received flag
+	ssize_t s = write(socketHandle, &FLAG_MSG_RECVD, 1);
 	lastHostCall()->useVirgin();
 //	}
 
