@@ -108,18 +108,18 @@ class Xaction: public libecap::adapter::Xaction {
 		void stopVb(); // stops receiving vb (if we are receiving it)
 		libecap::host::Xaction *lastHostCall(); // clears hostx
 
-		// custom method dealing with sending VB content to ecapguardian
-		void sendVbContent(std::string &chunk) const;
 		void checkWritten(ssize_t sent, size_type expectedSent, std::string name);
 
 	private:
+		size_type readTo = 0;
+		libecap::shared_ptr<libecap::Message> sharedPointerToVirginHeaders;
+		std::string buffer; // for content adaptation
 		std::string previousChunk;
 		std::ofstream logFile;
 
 		libecap::shared_ptr<const Service> service; // configuration access
 		libecap::host::Xaction *hostx; // Host transaction rep
 
-		std::string buffer; // for content adaptation
 		int socketHandle;  // the ecapguardian eCAP listener
 
 		typedef enum { opUndecided, opOn, opComplete, opNever } OperationState;
@@ -292,21 +292,13 @@ void Adapter::Xaction::start() {
 	char buf[BUF_SIZE];
 	char c;
 	Must(hostx);
-	libecap::shared_ptr<libecap::Message> adapted = hostx->virgin().clone();
+	sharedPointerToVirginHeaders = hostx->virgin().clone();
 	libecap::shared_ptr<libecap::Message> cause = hostx->cause().clone();
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::start" << std::endl;
 #endif
-	Must(adapted != 0);
+	Must(sharedPointerToVirginHeaders != 0);
 	Must(cause != 0);
-	if (!adapted->body()) {
-#ifdef DEBUG
-		logFile << "RESPMOD Xaction::start : no response body - skipping scan" << std::endl;
-#endif
-		sendingAb = opNever; // there is nothing to send
-		lastHostCall()->useVirgin();
-		return;
-	}
 
 	//
 	// Write the request headers to ecapguardian
@@ -314,6 +306,14 @@ void Adapter::Xaction::start() {
 	ssize_t s = 0;
 	// NOTE: ecapguardian REQUIRES 1 character past the final newline, so we just write 'size'
 	// instead of 'size - 1' because the last one is a null.  Same below with the response header.
+#ifdef DEBUG
+	if(cause->header().image().size == 0) {
+		logFile << "RESPMOD Xaction::start : empty cause header" << std::endl;
+	} else {
+		logFile << "RESPMOD Xaction::start : cause header size: " << cause->header().image().size << std::endl;
+		logFile << "RESPMOD Xaction::start : cause header:" << std::endl << cause->header().image() << std::endl;
+	}
+#endif
 	s = write(socketHandle, cause->header().image().start, cause->header().image().size);
 	checkWritten(s, cause->header().image().size, std::string("cause header"));
 
@@ -321,8 +321,15 @@ void Adapter::Xaction::start() {
 	// Write the response headers to ecapguardian
 	//
 	//ssize_t write(int fd, const void *buf, size_t count);
-        s = write(socketHandle, adapted->header().image().start, adapted->header().image().size);
-	checkWritten(s, adapted->header().image().size, std::string("response header"));
+#ifdef DEBUG
+	if(sharedPointerToVirginHeaders->header().image().size == 0) {
+		logFile << "RESPMOD Xaction::start : empty response header" << std::endl;
+	} else {
+		logFile << "RESPMOD Xaction::start : response header size: " << sharedPointerToVirginHeaders->header().image().size << std::endl;
+	}
+#endif
+        s = write(socketHandle, sharedPointerToVirginHeaders->header().image().start, sharedPointerToVirginHeaders->header().image().size);
+	checkWritten(s, sharedPointerToVirginHeaders->header().image().size, std::string("response header"));
 
 	// For some reason, the socket is not blocking.  This will do until I figure out why.
 	for(int sleepCount = 0; sleepCount < 10; sleepCount++) {
@@ -346,6 +353,9 @@ void Adapter::Xaction::start() {
         }
 
 	c = buf[0];
+#ifdef DEBUG
+	logFile << "RESPMOD Xaction::start : response char was '" << c << "'" << std::endl;
+#endif
 	if(c == FLAG_USE_VIRGIN) {
 #ifdef DEBUG
                 logFile << "RESPMOD Xaction::start : skipping content scan after request header check" << std::endl;
@@ -358,7 +368,9 @@ void Adapter::Xaction::start() {
 	//Write back the message received flag
 	//buf[0] = FLAG_MSG_RECVD;
 	s = write(socketHandle, &FLAG_MSG_RECVD, 1);
-
+#ifdef DEBUG
+	logFile << "RESPMOD Xaction::start : wrote FLAG_MSG_RECVD" << std::endl;
+#endif
 	if (hostx->virgin().body()) {
 #ifdef DEBUG
 		logFile << "RESPMOD Xaction::start : has VB, requesting it now" << std::endl;
@@ -430,8 +442,8 @@ void Adapter::Xaction::abMake()
 	// we are or were receiving vb
 	Must(receivingVb == opOn || receivingVb == opComplete);
 
-	sendingAb = opOn;
 	if (!buffer.empty()){
+		sendingAb = opOn;
 #ifdef DEBUG
 		logFile << "RESPMOD Xaction::abMake : buffer not empty" << std::endl;
 #endif
@@ -444,13 +456,6 @@ void Adapter::Xaction::abMakeMore() {
 	logFile << "RESPMOD Xaction::abMakeMore" << std::endl;
 #endif
 	Must(receivingVb == opOn); // a precondition for receiving more vb
-
-	//
-	// TODO: This likely needs to change
-	//	* Doesn't matter if the host has VB - the only AB here will be the
-	//		block page
-	//
-	hostx->vbMakeMore();
 }
 
 void Adapter::Xaction::abStopMaking() {
@@ -466,11 +471,9 @@ void Adapter::Xaction::abStopMaking() {
 libecap::Area Adapter::Xaction::abContent(size_type offset, size_type size) {
 	Must(sendingAb == opOn || sendingAb == opComplete);
 #ifdef DEBUG
-	logFile << "RESPMOD Xaction::abContent : offset=" << offset << ", size=" << size << std::endl;
+	logFile << "RESPMOD Xaction::abContent : buffer.size()=" << buffer.size() <<  "| offset=" << offset << ", size=" << size << std::endl;
 #endif
-	std::string contentBuffer = buffer.substr(offset, size);
-//	logFile << "RESPMOD Xaction::abContent actual content: " <<std::endl << contentBuffer << std::endl;
-	return libecap::Area::FromTempString(contentBuffer);
+	return libecap::Area::FromTempString(buffer.substr(offset, size));
 }
 
 void Adapter::Xaction::abContentShift(size_type size) {
@@ -479,6 +482,9 @@ void Adapter::Xaction::abContentShift(size_type size) {
 #endif
 	Must(sendingAb == opOn || sendingAb == opComplete);
 	buffer.erase(0, size);
+	if(buffer.size() <= 0) {
+		hostx->noteAbContentDone(true);
+	}
 }
 
 void Adapter::Xaction::noteVbContentDone(bool atEnd) {
@@ -489,73 +495,75 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 	Must(receivingVb == opOn);
 	stopVb();
 
-	// For the moment, just tell the host to use the original body.
-	// Need to make sure I handle this case - easy to lose it
-//	if(atEnd) {
-	//Write back the message received flag
-	ssize_t s = write(socketHandle, &FLAG_MSG_RECVD, 1);
-	lastHostCall()->useVirgin();
-//	}
+	// For the moment, just tell the host to use the 'adapted' (cached original) body.
+	hostx->useAdapted(sharedPointerToVirginHeaders);
 
-	if (sendingAb == opOn) {
-		hostx->noteAbContentDone(atEnd);
-		sendingAb = opComplete;
-	}
+//	if (sendingAb == opOn) {
+//		hostx->noteAbContentDone(atEnd);
+//		sendingAb = opComplete;
+//	}
 }
 
 void Adapter::Xaction::noteVbContentAvailable() {
-	Must(receivingVb == opOn);
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::noteVbContentAvailable" << std::endl;
-	logFile << std::flush;
 #endif
+	long startFrom = 0;
+	Must(receivingVb == opOn);
 	const libecap::Area vb = hostx->vbContent(0, libecap::nsize); // get all vb in this chunk
-	std::string chunk = vb.toString(); // expensive, but simple
-
-	//libecap::nsize above means 'until the end of the string'
-
-	logFile << "RESPMOD Xaction::noteVbContentAvailable : Chunk size: " << chunk.size() << std::endl;
-
-	if(!previousChunk.empty()){
-		// Compare the two - my guess is that the previousChunk will match the current chunk up until the length difference
-		logFile << "RESPMOD Xaction::noteVbContentAvailable : Previous Chunk size: " << previousChunk.size() << std::endl;
-		for(int i = 0; i < previousChunk.size(); i++){
-			if(previousChunk[i] != chunk[i]){
-				logFile << "Previous Chunk mismatch at " << i << std::endl;
-			}
-		}
-	}
-	previousChunk = chunk;
-	// We need the host to keep the original VB - don't tell it to throw anything away
-	// Is the only other option for the adapter to maintain the chunks and send them back
-	//	if the virgin body is OK?
-	//hostx->vbContentShift(vb.size); // we have a copy; do not need vb any more
-
-	//sendVbContent(chunk);
-
-	if (sendingAb == opOn){
+	std::string chunk = vb.toString();
 #ifdef DEBUG
-		logFile << "RESPMOD Xaction::noteVbContentAvailable : noting abContentAvailable" <<std::endl;
+	logFile << "RESPMOD Xaction::noteVbContentAvailable : chunk was size: " << chunk.size() << std::endl;
 #endif
-		hostx->noteAbContentAvailable();
-	}
-}
+	buffer += chunk;
+	hostx->vbContentShift(vb.size); // 'shift' means 'delete' since we have a copy
 
-void Adapter::Xaction::sendVbContent(std::string& chunk) const {
-	//
-	// This is where you send the VB to ecapguardian (likely in chunks of ~8k)
-	// CAUTION: The chunks of data that come through here likely DO NOT line up with
-	//	'chunked' transfer encoding boundaries!  Extra logic is needed on the
-	//	ecapguardian side to resolve the chunking boundaries if http 1.1 is 
-	//	to be supported.
-	//
+	ssize_t s = write(socketHandle, chunk.c_str(), chunk.size());
+	checkWritten(s, chunk.size(), "VB Content Chunk");
 
-	//
-	// DO NOT buffer the VB content that comes down the pipe
-	//	* Pass it to ecapguardian and discard
-	//	* We are either simply allowing the original response (no buffering necessary)
-	//		OR sending back a blockpage with its own buffer.  Don't waste memory.
-	//
+
+	// Check for response from ecapguardian here!
+	// Then send the response received signal
+        // For some reason, the socket is not blocking.  This will do until I figure out why.
+/*
+        for(int sleepCount = 0; sleepCount < 10; sleepCount++) {
+#ifdef DEBUG
+                logFile << "RESPMOD Xaction::noteVbContentAvailable : Sleeping #" << sleepCount << std::endl;
+#endif
+                s = read(socketHandle, buf, 1);
+                if(s > 0) {
+                        logFile << "RESPMOD Xaction::noteVbContentAvailable : s > 0: " << s << std::endl;
+                        break;
+                } else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+        }
+#ifdef DEBUG
+        logFile << "RESPMOD Xaction::noteVbContentAvailable : After receiving response char, s=" << s << std::endl;
+#endif
+        if(s != 1){
+                throw libecap::TextException("After response char, s was " + std::to_string(s));
+                exit(-1);
+        }
+
+        c = buf[0];
+#ifdef DEBUG
+        logFile << "RESPMOD Xaction::noteVbContentAvailable : response char was '" << c << "'" << std::endl;
+#endif
+	if(c == FLAG_USE_VIRGIN) {
+#ifdef DEBUG
+                logFile << "RESPMOD Xaction::noteVbContentAvailable : skipping content scan after request header check" << std::endl;
+#endif
+                sendingAb = opOn; // start the process of sending VB
+        }
+
+        //Write back the message received flag
+        //buf[0] = FLAG_MSG_RECVD;
+        s = write(socketHandle, &FLAG_MSG_RECVD, 1);
+#ifdef DEBUG
+        logFile << "RESPMOD Xaction::noteVbContentAvailable : wrote FLAG_MSG_RECVD" << std::endl;
+#endif
+*/
 }
 
 // tells the host that we are not interested in [more] vb
