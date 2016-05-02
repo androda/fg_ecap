@@ -227,7 +227,7 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
 	std::string filename;
         int randomId;
         srand(time(NULL));
-        filename += "/tmp/reqmodXaction" + std::to_string(randomId) + ".log";
+        filename += "/tmp/reqmodXaction" + std::to_string((rand() % 256)) + ".log";
         logFile.open(filename.c_str(), std::ofstream::out | std::ofstream::app);
         logFile << "REQMOD Xaction::Xaction" << std::endl;
 	logFile << "REQMOD Xaction::Xaction : eCAP Adapter socket path: '" << service->ecapguardian_listen_socket << "'" << std::endl;
@@ -658,12 +658,9 @@ libecap::Area Adapter::Xaction::abContent(size_type offset, size_type size) {
 #endif
 	if(blocked){
 		contentBuffer = e2buffer.substr(offset, size);
-/*
 #ifdef DEBUG
-		logFile << "eCAP Request Satisfaction (Responding without calling destination server) Body: "
-			<< std::endl << contentBuffer << std::endl;
+		logFile << "REQMOD Xaction::abContent : request blocked"  << std::endl;
 #endif
-*/
 	} else{
 		contentBuffer = buffer.substr(offset, size);
 #ifdef DEBUG
@@ -702,7 +699,6 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd)
 	stopVb();
 	if (sendingAb == opOn) {
 		hostx->noteAbContentDone(atEnd);
-		sendingAb = opOn;
 	}
 }
 
