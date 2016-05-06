@@ -14,6 +14,7 @@
 #include <iostream>
 #include <sys/un.h>
 #include <sys/socket.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <thread>
@@ -236,9 +237,13 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
         int socketConnectStatus;
         struct sockaddr_un addr;
         //service->ecapguardian_listen_socket is the socket path string
+	//The line below turns on blocking mode for the socket - not sure if I want that.
+	//socketHandle = socket(AF_UNIX, SOCK_STREAM & ~O_NONBLOCK, 0);
 	socketHandle = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (socketHandle == -1) {
+	if (socketHandle == -1) {
+#ifdef DEBUG
 		logFile << "RESPMOD Socket() filename " << service->ecapguardian_listen_socket << " errno: " << strerror(errno) << std::endl;
+#endif
 		throw libecap::TextException(RunErrorPrefix + "Failed to get Socket Handle for socket filename '" +
 			service->ecapguardian_listen_socket + "'. errno: " + strerror(errno));
         }
@@ -251,15 +256,17 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
 	logFile << "RESPMOD Xaction::Xaction: Connecting to socket: " << service->ecapguardian_listen_socket.c_str() << std::endl;
         //Make the connection
         socketConnectStatus = connect(socketHandle, (struct sockaddr*)&addr, sizeof(addr));
+#ifdef DEBUG
 	logFile << "RESPMOD Xaction::Xaction: after Connect, s=" << socketConnectStatus << std::endl;
-
+#endif
         if (socketConnectStatus < 0) {
+#ifdef DEBUG
         	logFile << "RESPMOD Connect errno: " << strerror(errno) << std::endl;
+#endif
                 throw libecap::TextException(RunErrorPrefix + "Failed to Connect to RESPMOD socket. errno: "
 			+ strerror(errno));
         }
         //If you got here, you're ready to start writing to the socket
-	logFile << std::flush;
 }
 
 Adapter::Xaction::~Xaction() {
@@ -330,20 +337,7 @@ void Adapter::Xaction::start() {
 #endif
         s = write(socketHandle, sharedPointerToVirginHeaders->header().image().start, sharedPointerToVirginHeaders->header().image().size);
 	checkWritten(s, sharedPointerToVirginHeaders->header().image().size, std::string("response header"));
-
-	// For some reason, the socket is not blocking.  This will do until I figure out why.
-	for(int sleepCount = 0; sleepCount < 10; sleepCount++) {
-#ifdef DEBUG
-		logFile << "RESPMOD Xaction::start : Sleeping #" << sleepCount << std::endl;
-#endif
-	        s = read(socketHandle, buf, 1);
-		if(s > 0) {
-			logFile << "RESPMOD Xaction::start : s > 0: " << s << std::endl;
-			break;
-		} else {
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		}
-	}
+        s = read(socketHandle, buf, 1);
 #ifdef DEBUG
         logFile << "RESPMOD Xaction::start : After receiving response char, s=" << s << std::endl;
 #endif
@@ -356,6 +350,18 @@ void Adapter::Xaction::start() {
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::start : response char was '" << c << "'" << std::endl;
 #endif
+	if(c == FLAG_USE_VIRGIN || c == FLAG_NEEDS_SCAN) {
+		//Write back the message received flag
+		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
+#ifdef DEBUG
+		logFile << "RESPMOD Xaction::start : wrote FLAG_MSG_RECVD" << std::endl;
+#endif
+	} else {
+		std::string error("RESPMOD Xaction::start : did not receive proper response flag.  Received '");
+		error.append(c, 1);
+		error.append("' insted of expected 'v' or 's'");
+		throw libecap::TextException(error);
+	}
 	if(c == FLAG_USE_VIRGIN) {
 #ifdef DEBUG
                 logFile << "RESPMOD Xaction::start : skipping content scan after request header check" << std::endl;
@@ -365,12 +371,6 @@ void Adapter::Xaction::start() {
 		return;
 	}
 
-	//Write back the message received flag
-	//buf[0] = FLAG_MSG_RECVD;
-	s = write(socketHandle, &FLAG_MSG_RECVD, 1);
-#ifdef DEBUG
-	logFile << "RESPMOD Xaction::start : wrote FLAG_MSG_RECVD" << std::endl;
-#endif
 	if (hostx->virgin().body()) {
 #ifdef DEBUG
 		logFile << "RESPMOD Xaction::start : has VB, requesting it now" << std::endl;
@@ -494,14 +494,131 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 #endif
 	Must(receivingVb == opOn);
 	stopVb();
+	size_t t;
+	ssize_t s = 0;
+	char buf[BUF_SIZE];
+	char c;
+#ifdef DEBUG
+        	logFile << "RESPMOD Xaction::noteVbContentDone : After writing response body to ecapguardian" << std::endl;
+#endif
+	        s = read(socketHandle, buf, 1);
+#ifdef DEBUG
+        logFile << "RESPMOD Xaction::noteVbContentDone : After receiving response char, s=" << s << std::endl;
+#endif
+        if(s != 1){
+#ifdef DEBUG
+		 logFile << "RESPMOD Xaction::noteVbContentDone : ERROR: After receiving response char, s=" << s << std::endl;
+#endif
+                throw libecap::TextException("After response char, s was " + std::to_string(s));
+                exit(-1);
+        }
 
-	// For the moment, just tell the host to use the 'adapted' (cached original) body.
-	hostx->useAdapted(sharedPointerToVirginHeaders);
-
-//	if (sendingAb == opOn) {
-//		hostx->noteAbContentDone(atEnd);
-//		sendingAb = opComplete;
-//	}
+	c = buf[0];
+#ifdef DEBUG
+	logFile << "RESPMOD Xaction::noteVbContentDone : response char was '" << c << "'" << std::endl;
+#endif
+	if(c == FLAG_USE_VIRGIN || c == FLAG_MSG_RECVD) {
+		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
+#ifdef DEBUG
+                logFile << "RESPMOD Xaction::start : wrote FLAG_MSG_RECVD" << std::endl;
+#endif
+        } else {
+                std::string error("RESPMOD Xaction::start : did not receive proper response flag.  Received '");
+                error.append(c, 1);
+                error.append("' insted of expected 'v' or 's'");
+                throw libecap::TextException(error);
+        }
+	if(c == FLAG_USE_VIRGIN) {
+#ifdef DEBUG
+                logFile << "RESPMOD Xaction::noteVbContentDone : Telling host to use original cached response body" << std::endl;
+#endif
+		hostx->useAdapted(sharedPointerToVirginHeaders);
+	}
+	if(c == FLAG_MODIFY) {  // Meaning block, basically - modifying the entire response
+		libecap::shared_ptr<libecap::Message> ptr;
+		libecap::Area headers;
+		libecap::Area responseBody;
+		std::string modifiedHeader;
+#ifdef DEBUG
+		logFile << "REQMOD Xaction::noteVbContentDone : modifying response (blocked or modified)" << std::endl;
+#endif
+		do{
+#ifdef DEBUG
+			logFile << "REQMOD Xaction::noteVbContentDone : Blockpage Header Input Do loop" << std::endl;
+#endif
+			s = read(socketHandle, buf, BUF_SIZE);
+#ifdef DEBUG
+			logFile << "REQMOD Xaction::noteVbContentDone : Read " << s << " header bytes." <<std::endl;
+#endif
+			modifiedHeader.append(buf, s);
+			if(modifiedHeader.rfind(FLAG_END) != std::string::npos){
+#ifdef DEBUG
+				logFile << "REQMOD Xaction::noteVbContentDone : End Header signal received - removing it from the header" << std::endl;
+#endif
+				//Rip out the last three chars: \n\0\0
+				t = modifiedHeader.rfind(FLAG_END_REMOVE);
+				if(t != std::string::npos){
+					modifiedHeader.replace(t, FLAG_END_REMOVE.length(), "");
+				}
+				s = 0;
+			}
+		} while(s > 0);
+#ifdef DEBUG
+		logFile << "REQMOD Xaction::noteVbContentDone : Modified Header read in: " << std::endl << modifiedHeader.c_str() << std::endl;
+#endif
+		//Next, send the 'headers received' signal to the server
+		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
+		//Now, read in the modified response body
+		buffer.clear();
+		do{
+#ifdef DEBUG
+			logFile << "REQMOD Xaction::noteVbContentDone : Modified Page Do Loop" << std::endl;
+#endif
+			s = read(socketHandle, buf, BUF_SIZE);
+#ifdef DEBUG
+			logFile << "REQMOD Xaction::noteVbContentDone : Read " << s << " modified page bytes" << std::endl;
+#endif
+			buffer.append(buf, s);
+			if(buffer.rfind(FLAG_END) != std::string::npos){
+#ifdef DEBUG
+				logFile << "REQMOD Xaction::noteVbContentDone : End Body signal received - removing it from the body" << std::endl;
+#endif
+				//Rip out the last three chars of the flag
+				t = buffer.rfind(FLAG_END_REMOVE);
+				if(t != std::string::npos){
+					buffer.replace(t, FLAG_END_REMOVE.length(), "");
+				}
+				s = 0;
+			}
+		} while(s > 0);
+		//Tell the server that we've received the modified response body
+		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
+		//Now the funky part - make adapted headers and tell host to use adapted
+		//This "libecap::MyHost().newResponse();" is found in registry.h
+#ifdef DEBUG
+		logFile << "REQMOD Xaction::noteVbContentDone : Sent MSG_RECVD flag" << std::endl;
+#endif
+		ptr = libecap::MyHost().newResponse();
+#ifdef DEBUG
+		logFile << "REQMOD Xaction::noteVbContentDone : Made new response message" << std::endl;
+#endif
+		headers = libecap::Area::FromTempString(modifiedHeader);
+#ifdef DEBUG
+		logFile << "REQMOD Xaction::noteVbContentDone : Made Headers 'Area'" << std::endl;
+#endif
+		ptr->header().parse(headers);
+#ifdef DEBUG
+		logFile << "REQMOD Xaction::noteVbContentDone : Parsed headers into request satisfaction message" << std::endl;
+#endif
+		ptr->addBody();  // This is just a flag saying that the message has a body.
+				// The body is pulled via abMake() and abContent()
+#ifdef DEBUG
+		logFile << "REQMOD Xaction::noteVbContentDone : Added body flag to request satisfaction message" << std::endl;
+#endif
+		//Need to use the correct message pointer - duh
+		hostx->useAdapted(ptr);
+		hostx->noteAbContentDone(true);
+	}
 }
 
 void Adapter::Xaction::noteVbContentAvailable() {
@@ -518,52 +635,18 @@ void Adapter::Xaction::noteVbContentAvailable() {
 	buffer += chunk;
 	hostx->vbContentShift(vb.size); // 'shift' means 'delete' since we have a copy
 
-	ssize_t s = write(socketHandle, chunk.c_str(), chunk.size());
-	checkWritten(s, chunk.size(), "VB Content Chunk");
-
-
-	// Check for response from ecapguardian here!
-	// Then send the response received signal
-        // For some reason, the socket is not blocking.  This will do until I figure out why.
-/*
-        for(int sleepCount = 0; sleepCount < 10; sleepCount++) {
+	size_t vb_chunk_written = 0;
+        do {
+                ssize_t s = write(socketHandle, chunk.c_str() + vb_chunk_written, chunk.size() - vb_chunk_written);
+                vb_chunk_written = vb_chunk_written + s;
 #ifdef DEBUG
-                logFile << "RESPMOD Xaction::noteVbContentAvailable : Sleeping #" << sleepCount << std::endl;
+	        logFile << "RESPMOD Xaction::noteVbContentAvailable : Wrote " << s << " bytes out of " << chunk.size() << " bytes total in chunk, "
+                         << vb_chunk_written << " written in total" << std::endl;
 #endif
-                s = read(socketHandle, buf, 1);
-                if(s > 0) {
-                        logFile << "RESPMOD Xaction::noteVbContentAvailable : s > 0: " << s << std::endl;
-                        break;
-                } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-        }
+        } while (vb_chunk_written < chunk.size());
 #ifdef DEBUG
-        logFile << "RESPMOD Xaction::noteVbContentAvailable : After receiving response char, s=" << s << std::endl;
+	logFile << "RESPMOD Xaction::noteVbContentAvailable : Finished writing this chunk" << std::endl;
 #endif
-        if(s != 1){
-                throw libecap::TextException("After response char, s was " + std::to_string(s));
-                exit(-1);
-        }
-
-        c = buf[0];
-#ifdef DEBUG
-        logFile << "RESPMOD Xaction::noteVbContentAvailable : response char was '" << c << "'" << std::endl;
-#endif
-	if(c == FLAG_USE_VIRGIN) {
-#ifdef DEBUG
-                logFile << "RESPMOD Xaction::noteVbContentAvailable : skipping content scan after request header check" << std::endl;
-#endif
-                sendingAb = opOn; // start the process of sending VB
-        }
-
-        //Write back the message received flag
-        //buf[0] = FLAG_MSG_RECVD;
-        s = write(socketHandle, &FLAG_MSG_RECVD, 1);
-#ifdef DEBUG
-        logFile << "RESPMOD Xaction::noteVbContentAvailable : wrote FLAG_MSG_RECVD" << std::endl;
-#endif
-*/
 }
 
 // tells the host that we are not interested in [more] vb
