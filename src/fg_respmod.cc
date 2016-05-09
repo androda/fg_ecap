@@ -517,7 +517,7 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 #ifdef DEBUG
 	logFile << "RESPMOD Xaction::noteVbContentDone : response char was '" << c << "'" << std::endl;
 #endif
-	if(c == FLAG_USE_VIRGIN || c == FLAG_MSG_RECVD) {
+	if(c == FLAG_USE_VIRGIN || c == FLAG_MODIFY) {
 		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
 #ifdef DEBUG
                 logFile << "RESPMOD Xaction::start : wrote FLAG_MSG_RECVD" << std::endl;
@@ -534,7 +534,7 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 #endif
 		hostx->useAdapted(sharedPointerToVirginHeaders);
 	}
-	if(c == FLAG_MODIFY) {  // Meaning block, basically - modifying the entire response
+	if(c == FLAG_MODIFY) {  // Modify as in block or re-write
 		libecap::shared_ptr<libecap::Message> ptr;
 		libecap::Area headers;
 		libecap::Area responseBody;
