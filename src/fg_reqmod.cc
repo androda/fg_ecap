@@ -14,6 +14,7 @@
 #include <sys/un.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <libecap/common/registry.h>
@@ -30,6 +31,12 @@
 namespace Adapter {
 
 using libecap::size_type;
+
+std::ostream& logStart(std::ostream& output) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        return output << getpid() << "," << tv.tv_sec << "." << tv.tv_usec << ",";
+}
 
 class Service: public libecap::adapter::Service {
 	public:
@@ -56,6 +63,7 @@ class Service: public libecap::adapter::Service {
 
 		std::string ecapguardian_listen_socket;
 
+		bool debug = false;
 	protected:
 		void set_listen_socket(const std::string &value);
 };
@@ -102,9 +110,7 @@ class Xaction: public libecap::adapter::Xaction {
 			//method for taking care of this
 
 	private:
-#ifdef DEBUG
 		std::ofstream logFile;
-#endif
 		libecap::shared_ptr<const Service> service;
 		libecap::host::Xaction *hostx;
 
@@ -116,6 +122,7 @@ class Xaction: public libecap::adapter::Xaction {
 		OperationState receivingVb;
 		OperationState sendingAb;
 
+		bool debug = false;
 		//// Used for determining which body buffer to use
 		//// Either the original body (useVirgin) or the modified one
 		bool blocked = false;
@@ -174,6 +181,8 @@ void Adapter::Service::setOne(const libecap::Name &name, const libecap::Area &va
 	const std::string value = valArea.toString();
 	if (name == "ecapguardian_listen_socket"){
 		set_listen_socket(value);
+	} else if(name == "debug") {
+		debug = true;
 	} else if (name.assignedHostId()) {
 		; // skip options that don't matter
 	} else{
@@ -223,16 +232,17 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
 	int bytes;
 	int s;
 	struct sockaddr_un addr;
-#ifdef DEBUG
-	std::string filename;
-        int randomId;
-        srand(time(NULL));
-        filename += "/tmp/reqmodXaction" + std::to_string((rand() % 256)) + ".log";
-        logFile.open(filename.c_str(), std::ofstream::out | std::ofstream::app);
-        logFile << "REQMOD Xaction::Xaction" << std::endl;
-	logFile << "REQMOD Xaction::Xaction : eCAP Adapter socket path: '" << service->ecapguardian_listen_socket << "'" << std::endl;
-        logFile.flush();
-#endif
+	debug = service->debug;
+	if(debug) {
+		std::string filename;
+	        int randomId;
+	        srand(time(NULL));
+	        filename += "/tmp/reqmodXaction" + std::to_string((rand() % 256)) + ".log";
+	        logFile.open(filename.c_str(), std::ofstream::out | std::ofstream::app);
+	        logFile << logStart <<  "REQMOD Xaction::Xaction" << std::endl;
+		logFile << logStart <<  "REQMOD Xaction::Xaction : eCAP Adapter socket path: '" << service->ecapguardian_listen_socket << "'" << std::endl;
+	        logFile.flush();
+	}
 	//Initializing the Unix Domain Socket connection
 	//service->ecapguardian_listen_socket is the socket path string
 	if ( (socketHandle = socket(AF_UNIX, SOCK_STREAM, 0) ) == -1) {
@@ -245,13 +255,13 @@ Adapter::Xaction::Xaction(libecap::shared_ptr<Service> aService,
 	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, service->ecapguardian_listen_socket.c_str(), sizeof(addr.sun_path)-1);
 
-        //logFile << "eCAP adapter: Connecting to socket" << std::endl;
+        //logFile << logStart <<  "eCAP adapter: Connecting to socket" << std::endl;
 	//Make the connection
 	s = connect(socketHandle, (struct sockaddr*)&addr, sizeof(addr));
-        //logFile << "eCAP adapter: after Connect, s=" << s << std::endl;
+        //logFile << logStart <<  "eCAP adapter: after Connect, s=" << s << std::endl;
 
 	if (s < 0) {
-	//	logFile << "eCAP errno: " << strerror(errno) << std::endl;
+	//	logFile << logStart <<  "eCAP errno: " << strerror(errno) << std::endl;
 		throw libecap::TextException(RunErrorPrefix + "Failed to Connect. errno: " + strerror(errno));
 	}
 	//If you got here, you're ready to start writing to the socket
@@ -265,11 +275,11 @@ Adapter::Xaction::~Xaction() {
 
 	//Close the socket
 	close(socketHandle);
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::~Xaction" << std::endl;
-	logFile << "=================================================" << std::endl;
-	logFile.close();
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::~Xaction" << std::endl;
+		logFile << logStart <<  "=================================================" << std::endl;
+		logFile.close();
+	}
 }
 
 const libecap::Area Adapter::Xaction::option(const libecap::Name &) const {
@@ -308,9 +318,9 @@ void Adapter::Xaction::start() {
 	*/
 	//The below 'hostx->virgin()' is a Message
 	if (hostx->virgin().body()) {
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : has VB" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : has VB" << std::endl;
+		}
 		receivingVb = opOn;
 		sendingAb = opWaiting;
 		hostx->vbMake(); // tell the host to give us the virgin request body
@@ -318,9 +328,9 @@ void Adapter::Xaction::start() {
 		// no virgin body?  Don't need it
 		receivingVb = opNever;
 		sendingAb = opWaiting;
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : no VB" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : no VB" << std::endl;
+		}
 	}
 
 	//Make a clone of the request message (in case we need to modify it)
@@ -329,14 +339,14 @@ void Adapter::Xaction::start() {
 	//Dump the request header over to ecapguardian
 	//ssize_t write(int fd, const void *buf, size_t count);
 	s = write(socketHandle, adapted->header().image().start, adapted->header().image().size);
-#ifdef DEBUG
-        logFile << "REQMOD Xaction::start : Original Request Header:" << std::endl
-            << adapted->header().image().toString().c_str() << std::endl;
-#endif
+	if(debug) {
+        	logFile << logStart <<  "REQMOD Xaction::start : Original Request Header:" << std::endl
+        	    << adapted->header().image().toString().c_str() << std::endl;
+	}
         if(s == -1){
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : errno on header write. errno:" << strerror(errno) << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : errno on header write. errno:" << strerror(errno) << std::endl;
+		}
 		//There was some sort of error
 		//We can recover from one of these types of errors
 		if(errno){
@@ -351,58 +361,58 @@ void Adapter::Xaction::start() {
         //The two nulls at the end are no longer necessary
         //The ecapguardian system knows to stop reading the header at double newlines
 
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::start : Dumped endHeader signal" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::start : Dumped endHeader signal" << std::endl;
+	}
 	//Make a BLOCKING read call, so that this adapter does not proceed
 	//until the request is fulfilled
 	s = read(socketHandle, buf, 1);
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::start : After receiving response char, s=" << s << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::start : After receiving response char, s=" << s << std::endl;
+	}
     	if(s != 1){
 		throw libecap::TextException("After response char, s was " + std::to_string(s));
 		exit(-1);
     	}
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::start : About to do char comparisons" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::start : About to do char comparisons" << std::endl;
+	}
 	c = buf[0];
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::start : Got char: " << c << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::start : Got char: " << c << std::endl;
+	}
 	if(c == FLAG_USE_VIRGIN){
 		//Tell the host to use the virgin request and move on with your life
 		blocked = false;
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : read 'v' from ecapguardian" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : read 'v' from ecapguardian" << std::endl;
+		}
 		lastHostCall()->useVirgin();
 		return;
 	} else if(c == FLAG_MODIFY){
 		//Tell the host to use the modified request (modified header, anyway)
 		blocked = false;
 		libecap::Area headers;
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : read 'm' from ecapguardian" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : read 'm' from ecapguardian" << std::endl;
+		}
 		//ecapguardian has modified the request
 		//Read in the modified request header, and tell the host to use the adapted message
 		//Don't lose track of the response body!
-		do{
-#ifdef DEBUG
-			logFile << "REQMOD Xaction::start : Header Input Do loop" << std::endl;
-#endif
+		do {
+			if(debug) {
+				logFile << logStart <<  "REQMOD Xaction::start : Header Input Do loop" << std::endl;
+			}
 			s = read(socketHandle, buf, BUF_SIZE);
-#ifdef DEBUG
-			logFile << "REQMOD Xaction::start : Read " << s << " header bytes." << std::endl;
-                        logFile << "REQMOD Xaction::start : Read char: " << buf[0] << std::endl;
-#endif
+			if(debug) {
+				logFile << logStart <<  "REQMOD Xaction::start : Read " << s << " header bytes." << std::endl;
+	                        logFile << logStart <<  "REQMOD Xaction::start : Read char: " << buf[0] << std::endl;
+			}
 			modifiedHeader.append(buf, s);
 			if(modifiedHeader.rfind(FLAG_END) != std::string::npos){
-#ifdef DEBUG
-				logFile << "REQMOD Xaction::start : End Header signal received - removing it from the header" << std::endl;
-#endif
+				if(debug) {
+					logFile << logStart <<  "REQMOD Xaction::start : End Header signal received - removing it from the header" << std::endl;
+				}
 				//Rip out the last three chars: \n\0\0
 				t = modifiedHeader.rfind(FLAG_END_REMOVE);
 				if(t != std::string::npos){
@@ -412,17 +422,17 @@ void Adapter::Xaction::start() {
 			}
 		} while(s > 0);
                 s = write(socketHandle, &FLAG_MSG_RECVD, 1);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Header read in: " << std::endl << modifiedHeader.c_str() << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Header read in: " << std::endl << modifiedHeader.c_str() << std::endl;
+		}
 		headers = libecap::Area::FromTempString(modifiedHeader);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Header Area created" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Header Area created" << std::endl;
+		}
 		adapted->header().parse(headers);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Header parsed in" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Header parsed in" << std::endl;
+		}
 		hostx->useAdapted(adapted);
 		return;
 	} else if(c == FLAG_BLOCK){
@@ -430,25 +440,25 @@ void Adapter::Xaction::start() {
 		libecap::Area headers;
 		libecap::Area responseBody;
 		blocked = true;
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : read 'b' from ecapguardian" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : read 'b' from ecapguardian" << std::endl;
+		}
 		//Only one other possibility here - a blocked request
 		//modifiedHeader
 		//Now, read back the block page headers
-		do{
-#ifdef DEBUG
-			logFile << "REQMOD Xaction::start : Header Input Do loop" << std::endl;
-#endif
+		do {
+			if(debug) {
+				logFile << logStart <<  "REQMOD Xaction::start : Header Input Do loop" << std::endl;
+			}
 			s = read(socketHandle, buf, BUF_SIZE);
-#ifdef DEBUG
-			logFile << "REQMOD Xaction::start : Read " << s << " header bytes." <<std::endl;
-#endif
+			if(debug) {
+				logFile << logStart <<  "REQMOD Xaction::start : Read " << s << " header bytes." <<std::endl;
+			}
 			modifiedHeader.append(buf, s);
 			if(modifiedHeader.rfind(FLAG_END) != std::string::npos){
-#ifdef DEBUG
-				logFile << "REQMOD Xaction::start : End Header signal received - removing it from the header" << std::endl;
-#endif
+				if(debug) {
+					logFile << logStart <<  "REQMOD Xaction::start : End Header signal received - removing it from the header" << std::endl;
+				}
 				//Rip out the last three chars: \n\0\0
 				t = modifiedHeader.rfind(FLAG_END_REMOVE);
 				if(t != std::string::npos){
@@ -457,25 +467,25 @@ void Adapter::Xaction::start() {
 				s = 0;
 			}
 		} while(s > 0);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Header read in: " << std::endl << modifiedHeader.c_str() << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Header read in: " << std::endl << modifiedHeader.c_str() << std::endl;
+		}
 		//Next, send the 'headers received' signal to the server
 		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
 		//Now, read in the block page
-		do{
-#ifdef DEBUG
-			logFile << "REQMOD Xaction::start : Blockpage Do Loop" << std::endl;
-#endif
+		do {
+			if(debug) {
+				logFile << logStart <<  "REQMOD Xaction::start : Blockpage Do Loop" << std::endl;
+			}
 			s = read(socketHandle, buf, BUF_SIZE);
-#ifdef DEBUG
-			logFile << "REQMOD Xaction::start : Read " << s << " blockpage bytes" << std::endl;
-#endif
+			if(debug) {
+				logFile << logStart <<  "REQMOD Xaction::start : Read " << s << " blockpage bytes" << std::endl;
+			}
 			e2buffer.append(buf, s);
 			if(e2buffer.rfind(FLAG_END) != std::string::npos){
-#ifdef DEBUG
-				logFile << "REQMOD Xaction::start : End Body signal received - removing it from the body" << std::endl;
-#endif
+				if(debug) {
+					logFile << logStart <<  "REQMOD Xaction::start : End Body signal received - removing it from the body" << std::endl;
+				}
 				//Rip out the last three chars of the flag
 				t = e2buffer.rfind(FLAG_END_REMOVE);
 				if(t != std::string::npos){
@@ -490,26 +500,26 @@ void Adapter::Xaction::start() {
 		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
 		//Now the funky part - make adapted headers and tell host to use adapted
 		//This "libecap::MyHost().newResponse();" is found in registry.h
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Sent MSG_RECVD flag" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Sent MSG_RECVD flag" << std::endl;
+		}
 		ptr = libecap::MyHost().newResponse();
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Made new response message" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Made new response message" << std::endl;
+		}
 		headers = libecap::Area::FromTempString(modifiedHeader);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Made Headers 'Area'" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Made Headers 'Area'" << std::endl;
+		}
 		ptr->header().parse(headers);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Parsed headers into request satisfaction message" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Parsed headers into request satisfaction message" << std::endl;
+		}
 		ptr->addBody();  // This is just a flag saying that the message has a body.
 				// The body is pulled via abMake() and abContent()
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::start : Added body flag to request satisfaction message" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::start : Added body flag to request satisfaction message" << std::endl;
+		}
 		//Need to use the correct message pointer - duh
 		hostx->useAdapted(ptr);
 		//I think the boolean parameter here tells the host whether they've
@@ -585,16 +595,16 @@ void Adapter::Xaction::start() {
 void Adapter::Xaction::stop() {
 	hostx = 0;
 	// the caller will delete
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::stop" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::stop" << std::endl;
+	}
 }
 
 void Adapter::Xaction::abDiscard()
 {
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::abDiscard" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::abDiscard" << std::endl;
+	}
 	Must(sendingAb == opUndecided); // have not started yet
 	sendingAb = opNever;
 	// we do not need more vb if the host is not interested in ab
@@ -603,15 +613,15 @@ void Adapter::Xaction::abDiscard()
 
 void Adapter::Xaction::abMake()
 {
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::abMake" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::abMake" << std::endl;
+	}
 	Must(sendingAb == opUndecided || sendingAb == opWaiting); // have not yet started or decided not to send
 	if(blocked){
 		sendingAb = opOn;
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::abMake : Request Page Blocked - responding with blockpage" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::abMake : Request Page Blocked - responding with blockpage" << std::endl;
+		}
 		hostx->noteAbContentAvailable();
 		return;
 	}
@@ -621,18 +631,18 @@ void Adapter::Xaction::abMake()
 	Must(receivingVb == opOn || receivingVb == opComplete);
 	if (receivingVb == opComplete){
 		sendingAb = opOn;
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::abMake : buffer not empty" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::abMake : buffer not empty" << std::endl;
+		}
 		hostx->noteAbContentAvailable();
 	}
 }
 
 void Adapter::Xaction::abMakeMore()
 {
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::abMakeMore" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::abMakeMore" << std::endl;
+	}
 	Must(receivingVb == opOn); // a precondition for receiving more vb
 	if(!blocked){
 		hostx->vbMakeMore();
@@ -641,9 +651,9 @@ void Adapter::Xaction::abMakeMore()
 
 void Adapter::Xaction::abStopMaking()
 {
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::abStopMaking" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::abStopMaking" << std::endl;
+	}
 	sendingAb = opComplete;
 	// we do not need more vb if the host is not interested in more ab
 	stopVb();
@@ -653,48 +663,48 @@ void Adapter::Xaction::abStopMaking()
 libecap::Area Adapter::Xaction::abContent(size_type offset, size_type size) {
 	Must(sendingAb == opOn || sendingAb == opComplete);
 	std::string contentBuffer;
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::abContent : offset=" << offset << ", size=" << size << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::abContent : offset=" << offset << ", size=" << size << std::endl;
+	}
 	if(blocked){
 		contentBuffer = e2buffer.substr(offset, size);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::abContent : request blocked"  << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::abContent : request blocked"  << std::endl;
+		}
 	} else{
 		contentBuffer = buffer.substr(offset, size);
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::abContent virgin request body : " << std::endl
-			<< contentBuffer << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::abContent virgin request body : " << std::endl
+				<< contentBuffer << std::endl;
+		}
 	}
 	return libecap::Area::FromTempString(contentBuffer);
 }
 
 void Adapter::Xaction::abContentShift(size_type size) {
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::abContentShift : size=" << size << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::abContentShift : size=" << size << std::endl;
+	}
 	Must(sendingAb == opOn || sendingAb == opComplete);
 
 	if(blocked){
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::abContentShift, erasing 'size' from blockpage buffer" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::abContentShift, erasing 'size' from blockpage buffer" << std::endl;
+		}
 		e2buffer.erase(0, size);
 	} else{
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::abContentShift, erasing 'size' from virgin body buffer" << std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::abContentShift, erasing 'size' from virgin body buffer" << std::endl;
+		}
 		buffer.erase(0, size);
 	}
 }
 
 void Adapter::Xaction::noteVbContentDone(bool atEnd)
 {
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::noteVbContentDone : atEnd=" << atEnd << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::noteVbContentDone : atEnd=" << atEnd << std::endl;
+	}
 	Must(receivingVb == opOn);
 	stopVb();
 	if (sendingAb == opOn) {
@@ -705,18 +715,18 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd)
 void Adapter::Xaction::noteVbContentAvailable()
 {
 	Must(receivingVb == opOn);
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::noteVbContentAvailable" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::noteVbContentAvailable" << std::endl;
+	}
 	const libecap::Area vb = hostx->vbContent(0, libecap::nsize); // grabs as much VB content as is available
 	std::string chunk = vb.toString(); // API says this is expensive - but it's necessary
 	hostx->vbContentShift(vb.size); // 'shift' means 'delete' since we have a copy
 	buffer += chunk; // don't just throw away what we got
 
 	if (sendingAb == opOn){
-#ifdef DEBUG
-		logFile << "REQMOD Xaction::noteVbContentAvailable : noting abContentAvailable" <<std::endl;
-#endif
+		if(debug) {
+			logFile << logStart <<  "REQMOD Xaction::noteVbContentAvailable : noting abContentAvailable" <<std::endl;
+		}
 		hostx->noteAbContentAvailable();
 	}
 }
@@ -724,9 +734,9 @@ void Adapter::Xaction::noteVbContentAvailable()
 // tells the host that we are not interested in [more] vb
 // if the host does not know that already
 void Adapter::Xaction::stopVb() {
-#ifdef DEBUG
-	logFile << "REQMOD Xaction::stopVb" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "REQMOD Xaction::stopVb" << std::endl;
+	}
 	if (receivingVb == opOn) {
 		hostx->vbStopMaking();
 		receivingVb = opComplete;
@@ -740,9 +750,9 @@ void Adapter::Xaction::stopVb() {
 // last call may delete adapter transaction if the host no longer needs it
 // TODO: replace with hostx-independent "done" method
 libecap::host::Xaction *Adapter::Xaction::lastHostCall() {
-#ifdef DEBUG
-	logFile << "Xaction::lastHostCall" << std::endl;
-#endif
+	if(debug) {
+		logFile << logStart <<  "Xaction::lastHostCall" << std::endl;
+	}
 	libecap::host::Xaction *x = hostx;
 	Must(x);
 	hostx = 0;
