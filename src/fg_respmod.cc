@@ -351,6 +351,7 @@ void Adapter::Xaction::start() {
         s = read(socketHandle, buf, 1);
 	if(debug) {
 	        logFile << logStart << "RESPMOD Xaction::start : After receiving response char, s=" << s << std::endl;
+                logFile << logStart << "RESPMOD Xaction::start : response header:" << std::endl << sharedPointerToVirginHeaders->header().image() << std::endl;
         }
 	if(s != 1){
                 throw libecap::TextException("After response char, s was " + std::to_string(s));
