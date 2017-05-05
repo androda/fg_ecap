@@ -136,13 +136,13 @@ class Xaction: public libecap::adapter::Xaction {
 		bool debug = false;
 		////  Flags and such for communication with server
                 const int BUF_SIZE = 1024;
-                const char FLAG_USE_VIRGIN = 'v';
-                const char FLAG_MODIFY = 'm';
-                const char FLAG_NEEDS_SCAN = 's';
-		const char FLAG_BLOCK = 'b';
+                const char FLAG_USE_VIRGIN = 'v';  // Allow original response header and body
+                const char FLAG_MODIFY = 'm';  // Modify (or replace) both the response header and response body
+		const char FLAG_MODIFY_HEADER_ONLY = 'h'; // Modify (or replace) only the response header : allow original response body
+                const char FLAG_NEEDS_SCAN = 's';  // Response needs scanning (based on header contents)
                 const char FLAG_MSG_RECVD = 'r'; // used to signal header/body received to the server
-                const std::string FLAG_END = "\n\n\0\0"; //used for headers/body end
-                const std::string FLAG_END_REMOVE = "\0\0"; //Remove this from the end of the headers/body
+                const std::string FLAG_END = "\n\n\0\042\0\042\0\042\0\0"; //used for headers/body end
+		const std::string FLAG_END_REMOVE = "\n\0\042\0\042\0\042\0\0";  // Ignores the first newline
 };
 
 static const std::string PACKAGE_NAME = "FilterGizmo RESPMOD ecapguardian";
@@ -527,7 +527,11 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 	if(debug) {
 		logFile << logStart << "RESPMOD Xaction::noteVbContentDone : response char was '" << c << "'" << std::endl;
 	}
-	if(c == FLAG_USE_VIRGIN || c == FLAG_MODIFY) {
+
+	// This is an important part of the protocol between ecap plugin and ecapguardian
+	// If the flag the server sends is invalid, then don't respond with message received
+	// Any new flags must be registered here
+	if(c == FLAG_USE_VIRGIN || c == FLAG_MODIFY || c == FLAG_MODIFY_HEADER_ONLY) {
 		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
 		if(debug) {
 	                logFile << logStart << "RESPMOD Xaction::start : wrote FLAG_MSG_RECVD" << std::endl;
@@ -543,6 +547,85 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 	                logFile << logStart << "RESPMOD Xaction::noteVbContentDone : Telling host to use original cached response body" << std::endl;
 		}
 		hostx->useAdapted(sharedPointerToVirginHeaders);
+	}
+	char newline = '\n';
+	if(c == FLAG_MODIFY_HEADER_ONLY) {  // Modify or rewrite the response header
+		libecap::shared_ptr<libecap::Message> ptr;
+		libecap::Area headers;
+		libecap::Area responseBody;
+		std::string modifiedHeader;
+		if(debug) {
+			logFile << logStart << "REQMOD Xaction::noteVbContentDone : modifying response header only" << std::endl;
+		}
+		do{
+			if(debug) {
+				logFile << logStart << "REQMOD Xaction::noteVbContentDone : New Response Header Input Do loop" << std::endl;
+			}
+			errno = 0;
+			s = read(socketHandle, buf, BUF_SIZE);
+			if(debug) {
+				logFile << logStart << "REQMOD Xaction::noteVbContentDone : Read " << s << " header bytes." <<std::endl;
+				if (errno) {
+					logFile << logStart << "ERRNO: " << strerror(errno) << std::endl;
+				}
+			}
+			modifiedHeader.append(buf, s);
+			t = modifiedHeader.rfind(FLAG_END);
+			if(t != std::string::npos){
+				if(debug) {
+					logFile << logStart << "REQMOD Xaction::noteVbContentDone : End Header signal received - removing it from the header" << std::endl;
+				}
+				//Rip out the end header signal
+				if(t != std::string::npos){
+					modifiedHeader.replace(t, FLAG_END_REMOVE.length(), "");
+				}
+				//Iterate through the header string backward and erase until you hit the last newline char
+				//Garbage chars are coming through at the end of headers sometimes
+				for (int i = modifiedHeader.length() - 1; i >= 0; i--) {
+					if (modifiedHeader.at(i) == newline) {
+						break;
+					} else {
+						if (debug) {
+							logFile << logStart << "REQMOD Xaction::noteVbContentDone : Erasing char " << i << " from modified header: "
+								 << modifiedHeader.at(i) << std::endl;
+						}
+						modifiedHeader.erase(i);
+					}
+				}
+				break;
+			}
+		} while(s > 0);
+		if(debug) {
+			logFile << logStart << "REQMOD Xaction::noteVbContentDone : Modified Header read in: " << std::endl << modifiedHeader.c_str() << std::endl;
+		}
+		//Next, send the 'headers received' signal to the server
+		s = write(socketHandle, &FLAG_MSG_RECVD, 1);
+		if(debug) {
+			logFile << logStart << "REQMOD Xaction::noteVbContentDone : Sent MSG_RECVD flag" << std::endl;
+		}
+		//Create new response object
+		//This "libecap::MyHost().newResponse();" is found in registry.h
+		ptr = libecap::MyHost().newResponse();
+		if(debug) {
+			logFile << logStart << "REQMOD Xaction::noteVbContentDone : Made new response message (modifying headers only)" << std::endl;
+		}
+		headers = libecap::Area::FromTempString(modifiedHeader);
+		if(debug) {
+			logFile << logStart << "REQMOD Xaction::noteVbContentDone : Made Headers 'Area'" << std::endl;
+		}
+		ptr->header().parse(headers);
+		if(debug) {
+			logFile << logStart << "REQMOD Xaction::noteVbContentDone : Parsed headers into request satisfaction message" << std::endl;
+		}
+		ptr->addBody();  // This is just a flag saying that the message has a body.
+				// The body is pulled via abMake() and abContent()
+		if(debug) {
+			logFile << logStart << "REQMOD Xaction::noteVbContentDone : Added body flag to request satisfaction message" << std::endl;
+		}
+		//Must specify 'useAdapted' to point to the new message
+		hostx->useAdapted(ptr);
+		//Response content is already available - we have the original stuff in the buffer
+		hostx->noteAbContentDone(true);
 	}
 	if(c == FLAG_MODIFY) {  // Modify as in block or re-write
 		libecap::shared_ptr<libecap::Message> ptr;
@@ -561,14 +644,27 @@ void Adapter::Xaction::noteVbContentDone(bool atEnd) {
 				logFile << logStart << "REQMOD Xaction::noteVbContentDone : Read " << s << " header bytes." <<std::endl;
 			}
 			modifiedHeader.append(buf, s);
-			if(modifiedHeader.rfind(FLAG_END) != std::string::npos){
+			t = modifiedHeader.rfind(FLAG_END);
+			if(t != std::string::npos){
 				if(debug) {
 					logFile << logStart << "REQMOD Xaction::noteVbContentDone : End Header signal received - removing it from the header" << std::endl;
 				}
-				//Rip out the last three chars: \n\0\0
-				t = modifiedHeader.rfind(FLAG_END_REMOVE);
+				//Rip out the end header signal
 				if(t != std::string::npos){
 					modifiedHeader.replace(t, FLAG_END_REMOVE.length(), "");
+				}
+				//Iterate through the header string backward and erase until you hit the last newline char
+				//For some reason, garbage chars are coming through at the end of headers sometimes
+				for (int i = modifiedHeader.length() - 1; i >= 0; i--) {
+					if (modifiedHeader.at(i) == newline) {
+						break;
+					} else {
+						if (debug) {
+							logFile << logStart << "REQMOD Xaction::noteVbContentDone : Erasing char " << i << " from modified header: "
+								<<  modifiedHeader.at(i) << std::endl;
+						}
+						modifiedHeader.erase(i);
+					}
 				}
 				s = 0;
 			}
